@@ -282,7 +282,9 @@
   let pads = loadPads();                 // [{label, hasAudio, fileName}]
   let audioCtx = null;
   let currentSource = null, currentEl = null;
-  const decoded = {};                    // idx -> AudioBuffer (cache)
+  const rawCache = {};                   // idx -> Promise<ArrayBuffer|null>  (préchargé dès le boot)
+  const decoded  = {};                   // idx -> Promise<AudioBuffer|null>  (décodé au 1er geste)
+  let warmed = false;
   let editingIdx = null;
   let pendingFile = null;                // staged ArrayBuffer in the modal
   let pendingFileName = null;
@@ -342,14 +344,34 @@
     if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     if(audioCtx.state === "suspended") await audioCtx.resume();
   }
-  async function getDecoded(idx){
-    if(decoded[idx]) return decoded[idx];
-    const raw = await idbGet(idx);
-    if(!raw) return null;
-    // decodeAudioData detaches the buffer → decode a copy, keep IDB source intact
-    const buf = await audioCtx.decodeAudioData(raw.slice(0));
-    decoded[idx] = buf;
-    return buf;
+
+  // Lecture IndexedDB → mise en cache de la Promise (évite les lectures redondantes).
+  // Ne nécessite PAS d'AudioContext : peut tourner dès le chargement de la page.
+  function getRaw(idx){
+    if(!(idx in rawCache)) rawCache[idx] = idbGet(idx).catch(() => null);
+    return rawCache[idx];
+  }
+
+  // Décodage PCM → mise en cache de la Promise. decodeAudioData détache le buffer,
+  // on décode donc une copie (slice) pour garder la source réutilisable.
+  function getDecoded(idx){
+    if(!(idx in decoded)){
+      decoded[idx] = getRaw(idx)
+        .then(raw => raw ? audioCtx.decodeAudioData(raw.slice(0)) : null)
+        .catch(() => null);
+    }
+    return decoded[idx];
+  }
+
+  // Précharge tous les ArrayBuffers assignés (sans AudioContext) dès le boot.
+  function preloadRaw(){ pads.forEach((p, i) => { if(p.hasAudio) getRaw(i); }); }
+
+  // Au tout premier geste : ouvre l'AudioContext et décode tous les pads en parallèle,
+  // pour que l'appui sur un pad précis soit ensuite instantané.
+  async function warmup(){
+    if(warmed) return; warmed = true;
+    await ensureAudio();
+    pads.forEach((p, i) => { if(p.hasAudio) getDecoded(i); });
   }
 
   function stopCurrent(){
@@ -510,9 +532,12 @@
     if(pendingFile){
       try{ await idbPut(idx, pendingFile); }
       catch(e){ toast("Stockage impossible"); return; }
-      delete decoded[idx];                 // invalider le cache décodé
+      delete decoded[idx]; delete rawCache[idx];   // invalider les caches
       pads[idx].hasAudio = true;
       pads[idx].fileName = pendingFileName || "";
+      // re-précharge / re-décode immédiatement → pad prêt sans attendre un 1er appui
+      getRaw(idx);
+      if(audioCtx) getDecoded(idx);
     }
     pads[idx].label = labelInput.value.trim();
     savePads(); renderPads(); closeModal();
@@ -522,7 +547,7 @@
     if(editingIdx === null) return;
     const idx = editingIdx;
     await idbDel(idx);
-    delete decoded[idx];
+    delete decoded[idx]; delete rawCache[idx];
     pads[idx] = { label:"", hasAudio:false, fileName:"" };
     savePads(); renderPads(); closeModal();
   });
@@ -544,6 +569,9 @@
 
   // ---------- boot ----------
   buildGrid();
+  preloadRaw();                                   // lecture IndexedDB en avance, sans AudioContext
+  // 1er geste n'importe où → ouvre l'AudioContext + décode tous les pads (capture = avant le tap pad)
+  window.addEventListener("pointerdown", warmup, { once:true, capture:true });
 
   if("serviceWorker" in navigator){
     window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
