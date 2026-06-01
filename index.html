@@ -136,6 +136,17 @@
   .pad.active .lbl{color:var(--accent-2);text-shadow:0 0 16px var(--accent-glow);}
   .pad.active .idx{color:var(--accent);opacity:.9;}
 
+  /* warming: décodage en cours → shimmer ambré + libellé estompé */
+  .pad.warming{cursor:progress;border-color:rgba(255,154,46,.22);}
+  .pad.warming .lbl{opacity:.32;}
+  .pad.warming .idx{color:var(--accent);opacity:.8;}
+  .pad.warming::before{
+    content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+    background:linear-gradient(105deg,transparent 32%,rgba(255,154,46,.20) 50%,transparent 68%);
+    background-size:230% 100%;animation:shimmer 1.15s linear infinite;
+  }
+  @keyframes shimmer{from{background-position:150% 0;}to{background-position:-50% 0;}}
+
   /* edit affordances */
   body.editing .pad{cursor:pointer;border-style:dashed;border-color:rgba(255,154,46,.35);}
   body.editing .pad.empty{opacity:.6;}
@@ -354,13 +365,22 @@
 
   // Décodage PCM → mise en cache de la Promise. decodeAudioData détache le buffer,
   // on décode donc une copie (slice) pour garder la source réutilisable.
+  // Pendant le décodage, le pad affiche un état « chauffe » (shimmer).
   function getDecoded(idx){
     if(!(idx in decoded)){
+      setWarming(idx, true);
       decoded[idx] = getRaw(idx)
         .then(raw => raw ? audioCtx.decodeAudioData(raw.slice(0)) : null)
-        .catch(() => null);
+        .catch(() => null)
+        .then(buf => { setWarming(idx, false); return buf; });
     }
     return decoded[idx];
+  }
+
+  // Indicateur visuel « chauffe » sur un pad (décodage en cours).
+  function setWarming(idx, on){
+    const el = grid.children[idx];
+    if(el) el.classList.toggle("warming", on);
   }
 
   // Précharge tous les ArrayBuffers assignés (sans AudioContext) dès le boot.
