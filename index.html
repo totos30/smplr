@@ -300,8 +300,9 @@
   let pendingFile = null;                // staged ArrayBuffer in the modal
   let pendingFileName = null;
 
-  // PTT
-  let micStream = null, micSource = null, pttHeld = false;
+  // PTT — micro persistant + gate de gain (le flux n'est acquis qu'une fois)
+  let micStream = null, micSource = null, micGain = null;
+  let pttHeld = false, micPriming = null, micReady = false;
 
   // ---------- persistence helpers ----------
   function loadPads(){
@@ -423,30 +424,68 @@
   function haptic(ms){ if(navigator.vibrate) try{ navigator.vibrate(ms); }catch(e){} }
 
   // ---------- push-to-talk ----------
+  // Acquiert le micro une seule fois et construit le graphe : source → gain(0) → destination.
+  // Le flux reste vif entre les appuis ; on n'ouvre/coupe que le gain → réactivité immédiate.
+  function primeMic(){
+    if(micReady) return Promise.resolve(true);
+    if(micPriming) return micPriming;
+    micPriming = (async () => {
+      await ensureAudio();
+      try{
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            // DSP désactivé → latence minimale pour un usage diffusion/talky-walky
+            echoCancellation:false, noiseSuppression:false, autoGainControl:false
+          }
+        });
+      }catch(e){
+        micPriming = null; toast("Micro refusé"); return false;
+      }
+      micSource = audioCtx.createMediaStreamSource(micStream);
+      micGain = audioCtx.createGain();
+      micGain.gain.value = 0;                 // muet au repos, mais le pipeline tourne
+      micSource.connect(micGain).connect(audioCtx.destination); // indépendant des pads
+      micReady = true; micPriming = null;
+      return true;
+    })();
+    return micPriming;
+  }
+
   async function startPTT(){
     pttHeld = true;
-    await ensureAudio();
-    try{
-      micStream = await navigator.mediaDevices.getUserMedia({ audio:true });
-    }catch(e){
-      pttHeld = false;
-      toast("Micro refusé");
-      return;
-    }
-    if(!pttHeld){ // relâché pendant la demande de permission
-      micStream.getTracks().forEach(t => t.stop()); micStream = null; return;
-    }
-    micSource = audioCtx.createMediaStreamSource(micStream);
-    micSource.connect(audioCtx.destination); // indépendant des pads
-    ptt.classList.add("live");
+    ptt.classList.add("live");                // retour visuel immédiat, sans attendre le micro
     haptic(20);
+    const ok = await primeMic();
+    if(!ok){ pttHeld = false; ptt.classList.remove("live"); return; }
+    if(!pttHeld) return;                       // relâché avant la fin de l'acquisition
+    const t = audioCtx.currentTime;
+    micGain.gain.cancelScheduledValues(t);
+    micGain.gain.setValueAtTime(micGain.gain.value, t);
+    micGain.gain.linearRampToValueAtTime(1, t + 0.004); // ouverture ~4 ms (anti-clic, imperceptible)
   }
+
   function stopPTT(){
     pttHeld = false;
-    if(micSource){ try{ micSource.disconnect(); }catch(e){} micSource = null; }
-    if(micStream){ micStream.getTracks().forEach(t => t.stop()); micStream = null; }
     ptt.classList.remove("live");
+    if(micReady && micGain){
+      const t = audioCtx.currentTime;
+      micGain.gain.cancelScheduledValues(t);
+      micGain.gain.setValueAtTime(micGain.gain.value, t);
+      micGain.gain.linearRampToValueAtTime(0, t + 0.006); // fermeture ~6 ms
+    }
+    // Le flux reste vif → appuis suivants instantanés.
   }
+
+  // Libère complètement le micro (indicateur OS éteint) quand l'app passe en arrière-plan.
+  function releaseMic(){
+    pttHeld = false; ptt.classList.remove("live");
+    if(micSource){ try{ micSource.disconnect(); }catch(e){} micSource = null; }
+    if(micGain){ try{ micGain.disconnect(); }catch(e){} micGain = null; }
+    if(micStream){ micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    micReady = false; micPriming = null;
+  }
+  document.addEventListener("visibilitychange", () => { if(document.hidden) releaseMic(); });
+  window.addEventListener("pagehide", releaseMic);
 
   // ---------- rendering ----------
   const grid = document.getElementById("grid");
@@ -492,8 +531,8 @@
     e.preventDefault();
     startPTT();
   });
-  window.addEventListener("pointerup", () => { if(micStream || pttHeld) stopPTT(); });
-  window.addEventListener("pointercancel", () => { if(micStream || pttHeld) stopPTT(); });
+  window.addEventListener("pointerup", () => { if(pttHeld) stopPTT(); });
+  window.addEventListener("pointercancel", () => { if(pttHeld) stopPTT(); });
 
   // ---------- mode toggle ----------
   const modeSeg = document.getElementById("modeSeg");
