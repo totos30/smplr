@@ -1,5 +1,5 @@
 // SMPLR — Service Worker (cache offline des assets statiques)
-const CACHE = "smplr-v4";
+const CACHE = "smplr-v5";
 const ASSETS = [
   "./",
   "./index.html",
