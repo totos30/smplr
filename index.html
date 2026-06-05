@@ -153,6 +153,9 @@
   body.editing .pad .plus{display:block;}
   .pad .plus{display:none;position:absolute;bottom:8px;right:10px;color:var(--accent);font-size:15px;font-weight:700;line-height:1;}
 
+  /* conteneur effets + PTT : pile verticale (portrait) / colonne droite (paysage) */
+  .dock{display:flex;flex-direction:column;gap:var(--gap);flex:0 0 auto;min-height:0;}
+
   /* ---------- barre d'effets de voix ---------- */
   .fxbar{display:flex;gap:8px;flex:0 0 auto;}
   .fx{
@@ -244,6 +247,28 @@
     box-shadow:0 14px 30px -16px #000;
   }
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+
+  /* ---------- paysage : pads à gauche, effets + PTT à droite (sous le pouce) ---------- */
+  @media (orientation:landscape){
+    #app{
+      max-width:none;
+      display:grid;
+      grid-template-columns:1fr clamp(150px,32vw,260px);
+      grid-template-rows:auto 1fr;
+      grid-template-areas:"bar bar" "grid dock";
+      column-gap:var(--gap);row-gap:10px;
+      padding:calc(env(safe-area-inset-top) + 8px)
+              calc(env(safe-area-inset-right) + 12px)
+              calc(env(safe-area-inset-bottom) + 10px)
+              calc(env(safe-area-inset-left) + 12px);
+    }
+    .bar{grid-area:bar;}
+    .grid{grid-area:grid;}
+    .dock{grid-area:dock;min-height:0;}
+    .fxbar{flex:2;flex-direction:column;}   /* les 4 effets s'empilent verticalement */
+    .fx{flex:1;height:auto;}
+    .ptt{flex:3;height:auto;}               /* grand bouton plein-hauteur, prise au pouce */
+  }
 </style>
 </head>
 <body>
@@ -264,17 +289,19 @@
 
     <main class="grid" id="grid"></main>
 
-    <div class="fxbar" id="fxbar">
-      <button class="fx on" data-fx="none">Sans effet</button>
-      <button class="fx" data-fx="reverb">Reverb</button>
-      <button class="fx" data-fx="robot">Robot</button>
-      <button class="fx" data-fx="baby">Bébé</button>
-    </div>
+    <div class="dock">
+      <div class="fxbar" id="fxbar">
+        <button class="fx on" data-fx="none">Sans effet</button>
+        <button class="fx" data-fx="reverb">Reverb</button>
+        <button class="fx" data-fx="robot">Robot</button>
+        <button class="fx" data-fx="baby">Bébé</button>
+      </div>
 
-    <button class="ptt" id="ptt">
-      <svg class="mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v4"/></svg>
-      <span id="pttLbl">Push to talk</span>
-    </button>
+      <button class="ptt" id="ptt">
+        <svg class="mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v4"/></svg>
+        <span id="pttLbl">Push to talk</span>
+      </button>
+    </div>
   </div>
 
   <!-- edit modal -->
