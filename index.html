@@ -522,8 +522,15 @@ registerProcessor('pitch-shifter', PitchShifter);
   }
 
   async function ensureAudio(){
-    if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    if(audioCtx.state === "suspended") await audioCtx.resume();
+    if(!audioCtx){
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      // Un changement de périphérique (bascule Bluetooth A2DP↔HFP) peut suspendre/interrompre
+      // le contexte : on tente de le relancer automatiquement.
+      audioCtx.addEventListener("statechange", () => {
+        if(audioCtx.state === "suspended" || audioCtx.state === "interrupted") audioCtx.resume().catch(() => {});
+      });
+    }
+    if(audioCtx.state !== "running") await audioCtx.resume();
   }
 
   // Lecture IndexedDB → mise en cache de la Promise (évite les lectures redondantes).
@@ -593,46 +600,45 @@ registerProcessor('pitch-shifter', PitchShifter);
   function haptic(ms){ if(navigator.vibrate) try{ navigator.vibrate(ms); }catch(e){} }
 
   // ---------- push-to-talk ----------
-  // Acquiert le micro une seule fois et construit le graphe : source → gain(0) → destination.
-  // Le flux reste vif entre les appuis ; on n'ouvre/coupe que le gain → réactivité immédiate.
-  function primeMic(){
+  // Le micro est libéré à chaque relâchement : indispensable avec une enceinte Bluetooth,
+  // qui ne peut pas tenir simultanément la sortie stéréo (A2DP) et l'entrée micro (HFP).
+  // Garder le micro ouvert bloquerait l'enceinte en mode mains-libres → plus de son sur les pads.
+  let releaseTimer = null;
+
+  function acquireMic(){
     if(micReady) return Promise.resolve(true);
     if(micPriming) return micPriming;
     micPriming = (async () => {
       await ensureAudio();
       try{
         micStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            // DSP désactivé → latence minimale pour un usage diffusion/talky-walky
-            echoCancellation:false, noiseSuppression:false, autoGainControl:false
-          }
+          audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false }
         });
-      }catch(e){
-        micPriming = null; toast("Micro refusé"); return false;
-      }
+      }catch(e){ micPriming = null; toast("Micro refusé"); return false; }
       micSource = audioCtx.createMediaStreamSource(micStream);
       micGain = audioCtx.createGain();
-      micGain.gain.value = 0;                 // muet au repos, mais le pipeline tourne
-      micSource.connect(micGain);             // → chaîne d'effets → destination (via routeEffect)
+      micGain.gain.value = 0;
+      micSource.connect(micGain);
       micReady = true; micPriming = null;
-      loadPitchModule();                      // préchargement non bloquant (pour l'effet Bébé)
-      routeEffect();                          // connecte selon l'effet courant (par défaut: aucun)
+      if(currentFx === "baby") loadPitchModule();
+      routeEffect();                          // connecte la chaîne d'effets → destination
       return true;
     })();
     return micPriming;
   }
 
   async function startPTT(){
+    clearTimeout(releaseTimer);               // annule une libération en attente (ré-appui rapide)
     pttHeld = true;
-    ptt.classList.add("live");                // retour visuel immédiat, sans attendre le micro
+    ptt.classList.add("live");                // retour visuel immédiat
     haptic(20);
-    const ok = await primeMic();
+    const ok = await acquireMic();
     if(!ok){ pttHeld = false; ptt.classList.remove("live"); return; }
-    if(!pttHeld) return;                       // relâché avant la fin de l'acquisition
+    if(!pttHeld){ releaseMic(); return; }     // relâché avant la fin de l'acquisition
     const t = audioCtx.currentTime;
     micGain.gain.cancelScheduledValues(t);
-    micGain.gain.setValueAtTime(micGain.gain.value, t);
-    micGain.gain.linearRampToValueAtTime(1, t + 0.004); // ouverture ~4 ms (anti-clic, imperceptible)
+    micGain.gain.setValueAtTime(0, t);
+    micGain.gain.linearRampToValueAtTime(1, t + 0.01);
   }
 
   function stopPTT(){
@@ -642,19 +648,23 @@ registerProcessor('pitch-shifter', PitchShifter);
       const t = audioCtx.currentTime;
       micGain.gain.cancelScheduledValues(t);
       micGain.gain.setValueAtTime(micGain.gain.value, t);
-      micGain.gain.linearRampToValueAtTime(0, t + 0.006); // fermeture ~6 ms
+      micGain.gain.linearRampToValueAtTime(0, t + 0.02);  // fondu de fermeture (anti-clic)
     }
-    // Le flux reste vif → appuis suivants instantanés.
+    // Libère le micro juste après le fondu → l'enceinte BT rebascule en A2DP, les pads ressonnent.
+    clearTimeout(releaseTimer);
+    releaseTimer = setTimeout(() => { if(!pttHeld) releaseMic(); }, 90);
   }
 
-  // Libère complètement le micro (indicateur OS éteint) quand l'app passe en arrière-plan.
   function releaseMic(){
+    clearTimeout(releaseTimer);
     pttHeld = false; ptt.classList.remove("live");
     teardownFxNodes();
     if(micSource){ try{ micSource.disconnect(); }catch(e){} micSource = null; }
     if(micGain){ try{ micGain.disconnect(); }catch(e){} micGain = null; }
     if(micStream){ micStream.getTracks().forEach(t => t.stop()); micStream = null; }
     micReady = false; micPriming = null;
+    // le changement de route audio (HFP→A2DP) peut suspendre le contexte : on le relance.
+    if(audioCtx && audioCtx.state !== "running") audioCtx.resume().catch(() => {});
   }
   document.addEventListener("visibilitychange", () => { if(document.hidden) releaseMic(); });
   window.addEventListener("pagehide", releaseMic);
