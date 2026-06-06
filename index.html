@@ -66,6 +66,8 @@
     box-shadow:0 0 10px var(--accent-glow);animation:breathe 3.2s ease-in-out infinite;
   }
   @keyframes breathe{0%,100%{opacity:.55;}50%{opacity:1;}}
+  .brand .ver{font-size:9px;font-weight:600;letter-spacing:.1em;color:var(--muted);
+    border:1px solid var(--line);border-radius:6px;padding:2px 5px;margin-left:2px;}
 
   .controls{display:flex;align-items:center;gap:8px;}
 
@@ -274,7 +276,7 @@
 <body>
   <div id="app">
     <header class="bar">
-      <div class="brand"><span class="dot"></span>SMPLR</div>
+      <div class="brand"><span class="dot"></span>SMPLR<span class="ver" id="ver"></span></div>
       <div class="controls">
         <div class="seg" id="modeSeg">
           <button data-mode="oneshot" class="on">One-shot</button>
@@ -335,12 +337,14 @@
   const PAD_COUNT = 12;
   const LS_PADS = "smplr.pads.v1";
   const LS_MODE = "smplr.mode.v1";
+  const APP_VERSION = "v8";               // affiché dans la barre — doit suivre la version du cache SW
 
   // ---------- state ----------
   let editMode = false;
   let playMode = localStorage.getItem(LS_MODE) || "oneshot"; // oneshot | hold
   let pads = loadPads();                 // [{label, hasAudio, fileName}]
   let audioCtx = null;
+  let ctxStale = false;                  // contexte à recréer (route audio cassée par bascule Bluetooth)
   let currentSource = null, currentEl = null;
   const rawCache = {};                   // idx -> Promise<ArrayBuffer|null>  (préchargé dès le boot)
   const decoded  = {};                   // idx -> Promise<AudioBuffer|null>  (décodé au 1er geste)
@@ -522,12 +526,17 @@ registerProcessor('pitch-shifter', PitchShifter);
   }
 
   async function ensureAudio(){
+    // Contexte marqué obsolète (route audio cassée après un PTT en Bluetooth) → on le recrée.
+    if(ctxStale && audioCtx){
+      try{ await audioCtx.close(); }catch(e){}
+      audioCtx = null; ctxStale = false;
+      pitchReady = false; pitchLoading = null;   // le worklet doit être rechargé sur le nouveau contexte
+      // Les AudioBuffer déjà décodés restent réutilisables sur un nouveau contexte (pas de re-décodage).
+    }
     if(!audioCtx){
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      // Un changement de périphérique (bascule Bluetooth A2DP↔HFP) peut suspendre/interrompre
-      // le contexte : on tente de le relancer automatiquement.
       audioCtx.addEventListener("statechange", () => {
-        if(audioCtx.state === "suspended" || audioCtx.state === "interrupted") audioCtx.resume().catch(() => {});
+        if(audioCtx && (audioCtx.state === "suspended" || audioCtx.state === "interrupted")) audioCtx.resume().catch(() => {});
       });
     }
     if(audioCtx.state !== "running") await audioCtx.resume();
@@ -663,8 +672,10 @@ registerProcessor('pitch-shifter', PitchShifter);
     if(micGain){ try{ micGain.disconnect(); }catch(e){} micGain = null; }
     if(micStream){ micStream.getTracks().forEach(t => t.stop()); micStream = null; }
     micReady = false; micPriming = null;
-    // le changement de route audio (HFP→A2DP) peut suspendre le contexte : on le relance.
-    if(audioCtx && audioCtx.state !== "running") audioCtx.resume().catch(() => {});
+    // Le micro a forcé le Bluetooth en HFP ; à la sortie, la route A2DP revient mais l'ancien
+    // contexte reste lié à une route morte. On le marque obsolète : il sera recréé au prochain
+    // usage (tap d'un pad ou nouvel appui PTT), une fois l'enceinte revenue en A2DP.
+    ctxStale = true;
   }
   document.addEventListener("visibilitychange", () => { if(document.hidden) releaseMic(); });
   window.addEventListener("pagehide", releaseMic);
@@ -819,6 +830,7 @@ registerProcessor('pitch-shifter', PitchShifter);
   window.addEventListener("contextmenu", e => { if(e.target.closest(".pad, .ptt")) e.preventDefault(); });
 
   // ---------- boot ----------
+  document.getElementById("ver").textContent = APP_VERSION;
   buildGrid();
   preloadRaw();                                   // lecture IndexedDB en avance, sans AudioContext
   // 1er geste n'importe où → ouvre l'AudioContext + décode tous les pads (capture = avant le tap pad)
